@@ -1,0 +1,92 @@
+with 
+    first_payments as
+        (  select user_id,
+                date_trunc('day', min(transaction_datetime)) as first_payment_date
+           from skyeng_db.payments
+           where status_name = 'success'
+           group by user_id
+         ),
+    all_dates as
+        ( select date_trunc('day', class_start_datetime) as dt
+          from skyeng_db.classes
+          where class_start_datetime between '2016-01-01' and '2016-12-31'
+          group by dt
+        ),
+    all_dates_by_user as
+            (  select first_payments.user_id, 
+                      all_dates.dt
+               from first_payments 
+                    inner join all_dates 
+                        on all_dates.dt >= first_payments.first_payment_date
+            ),
+    payments_by_dates as
+            (  select user_id,
+               date_trunc('day', transaction_datetime) as payment_date,
+               sum(classes) as transaction_balance_change
+               from skyeng_db.payments
+               where status_name = 'success'
+               group by user_id,
+                        payment_date
+               order by user_id,
+                        payment_date
+            ),
+    payments_by_dates_cumsum as
+            (   select all_dates_by_user.user_id,
+                      all_dates_by_user.dt,
+                      payments_by_dates.transaction_balance_change,
+                      sum(payments_by_dates.transaction_balance_change)over(partition by all_dates_by_user.user_id order by all_dates_by_user.dt ) as transaction_balance_change_cs
+                from all_dates_by_user
+                     left join payments_by_dates
+                           on all_dates_by_user.user_id = payments_by_dates.user_id 
+                               and all_dates_by_user.dt = payments_by_dates.payment_date
+             ),
+    classes_by_dates as
+            (  select user_id,
+                      date_trunc('day', class_start_datetime) as class_date,  
+                      count(id_class) * -1 as classes
+               from skyeng_db.classes
+               where class_status in('success', 'failed_by_student') and class_type != 'trial'
+               group by user_id,
+                        class_date
+            ),
+    classes_by_dates_dates_cumsum as
+            (  select all_dates_by_user.user_id,
+                      all_dates_by_user.dt,
+                      classes_by_dates.classes,
+                      sum(classes_by_dates.classes)over(partition by all_dates_by_user.user_id order by all_dates_by_user.dt ) as classes_cs
+                from all_dates_by_user
+                     left join classes_by_dates
+                           on all_dates_by_user.user_id = classes_by_dates.user_id 
+                               and all_dates_by_user.dt = classes_by_dates.class_date
+            ),
+    balances as    
+            ( select payments_by_dates_cumsum.user_id,
+                     payments_by_dates_cumsum.dt,
+                     payments_by_dates_cumsum.transaction_balance_change,
+                     payments_by_dates_cumsum.transaction_balance_change_cs,
+                     classes_by_dates_dates_cumsum.classes,
+                     classes_by_dates_dates_cumsum.classes_cs,
+                     classes_by_dates_dates_cumsum.classes_cs + payments_by_dates_cumsum.transaction_balance_change_cs as balance
+              from payments_by_dates_cumsum
+                join  classes_by_dates_dates_cumsum
+                  on payments_by_dates_cumsum.user_id = classes_by_dates_dates_cumsum.user_id 
+                                and payments_by_dates_cumsum.dt = classes_by_dates_dates_cumsum.dt
+              group by payments_by_dates_cumsum.user_id,
+                    payments_by_dates_cumsum.dt,
+                    payments_by_dates_cumsum.transaction_balance_change,
+                    payments_by_dates_cumsum.transaction_balance_change_cs,
+                    classes_by_dates_dates_cumsum.classes,
+                    classes_by_dates_dates_cumsum.classes_cs,
+                    balance
+            )
+    select dt,
+           sum(transaction_balance_change) as sum_transaction_balance_change,
+           sum(transaction_balance_change_cs) as sum_transaction_balance_change_cs,
+           sum(classes) as sum_classes, 
+           sum(classes_cs) as sum_classes_cs, 
+           sum(balance) as sum_balance
+    from balances
+    group by dt 
+    order by dt  
+    
+  
